@@ -1,0 +1,733 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Cozinha Junina</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #111; display: flex; justify-content: center; align-items: flex-start; min-height: 100vh; }
+  canvas { display: block; width: 384px; max-width: 100vw; touch-action: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+/*
+  ================================================================
+  COZINHA JUNINA — BASE ESTILO OVERCOOKED
+  ================================================================
+
+  COMO USAR SUAS PRÓPRIAS IMAGENS:
+  ---------------------------------
+  1. Carregue a imagem no início do script (logo abaixo):
+       const imgChao = new Image();
+       imgChao.src = 'URL_ou_Base64_da_imagem';
+
+  2. Substitua o conteúdo da função desenha___() por:
+       ctx.drawImage(imgChao, x, y, TILE, TILE);
+
+  3. Para imagens que não carregaram ainda, use:
+       if (imgChao.complete) ctx.drawImage(imgChao, x, y, TILE, TILE);
+       else { /* fallback geométrico aqui * / }
+
+  As funções que você vai querer trocar estão na SEÇÃO 4.
+  ================================================================
+*/
+
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+
+// ════════════════════════════════════════════════════════════════
+//  SEÇÃO 1 · CONFIGURAÇÕES
+//  Edite estes valores para ajustar velocidade, tempo, etc.
+// ════════════════════════════════════════════════════════════════
+const TILE         = 64;   // px de cada célula do grid
+const COLS         = 6;    // colunas do mapa
+const ROWS         = 6;    // linhas do mapa
+const HUD_H        = 120;  // altura do painel superior (px)
+const CTRL_H       = 160;  // altura da área de controles (px)
+const W            = TILE * COLS;              // 384px
+const H            = HUD_H + TILE * ROWS + CTRL_H; // 664px
+const VELOCIDADE   = 2.8;  // px por frame
+const TEMPO_CHAPA  = 3500; // ms para cozinhar na chapa
+const TEMPO_PARTIDA = 90;  // segundos de partida
+
+canvas.width  = W;
+canvas.height = H;
+
+
+// ════════════════════════════════════════════════════════════════
+//  SEÇÃO 2 · MAPA E ESTAÇÕES
+//  Cada número define o tipo da célula:
+//    0 = chão livre   1 = parede
+//    2 = despensa     3 = chapa
+//    4 = bancada      5 = entrega
+//
+//  Mude os números para redesenhar a cozinha!
+//  O fluxo da receita: 2 → 3 → 4 → 5
+// ════════════════════════════════════════════════════════════════
+const MAP = [
+  [1, 1, 1, 1, 1, 1],
+  [1, 2, 0, 0, 3, 1],   // despensa (esq) | chapa (dir)
+  [1, 0, 0, 0, 0, 1],
+  [1, 0, 0, 0, 0, 1],
+  [1, 4, 0, 0, 5, 1],   // bancada  (esq) | entrega (dir)
+  [1, 1, 1, 1, 1, 1],
+];
+
+// Metadados de cada tipo de estação (cor placeholder e rótulo)
+const ESTACAO_INFO = {
+  2: { rotulo: 'Despensa', cor: '#c8902c' },
+  3: { rotulo: 'Chapa',    cor: '#b03028' },
+  4: { rotulo: 'Bancada',  cor: '#2468a0' },
+  5: { rotulo: 'Entrega',  cor: '#248040' },
+};
+
+// Nomes legíveis de cada item
+const NOME_ITEM = {
+  goma_crua:   'Goma crua',
+  goma_pronta: 'Goma pronta',
+  tapioca:     'Tapioca',
+};
+
+// Constrói a lista de estações a partir do mapa
+// (não precisa editar — atualiza automaticamente com o MAP)
+const sts = [];
+for (let r = 0; r < ROWS; r++) {
+  for (let c = 0; c < COLS; c++) {
+    const tipo = MAP[r][c];
+    if (tipo >= 2) {
+      sts.push({
+        tipo, col: c, row: r,
+        cx: c * TILE + TILE / 2,
+        cy: HUD_H + r * TILE + TILE / 2,
+        item: null,
+        cozinhando: false,
+        timer: 0,
+      });
+    }
+  }
+}
+
+
+// ════════════════════════════════════════════════════════════════
+//  SEÇÃO 3 · ESTADO DO JOGO
+//  Tudo que muda durante a partida
+// ════════════════════════════════════════════════════════════════
+const jog = {
+  x: W / 2,
+  y: HUD_H + TILE * 2.5,
+  tam: 36,
+  item: null,   // null | 'goma_crua' | 'goma_pronta' | 'tapioca'
+};
+
+let pontos        = 0;
+let tempoRestante = TEMPO_PARTIDA;
+let fase          = 'inicio'; // 'inicio' | 'jogando' | 'fim'
+let ultimoTS      = null;
+let aviso         = { texto: '', timer: 0 };
+
+
+// ════════════════════════════════════════════════════════════════
+//  SEÇÃO 4 · ARTE  ← TROQUE AQUI PELOS SEUS DESIGNS
+//
+//  Carregue suas imagens aqui:
+//
+//    const imgJogador  = new Image(); imgJogador.src  = 'jogador.png';
+//    const imgChao     = new Image(); imgChao.src     = 'chao.png';
+//    const imgParede   = new Image(); imgParede.src   = 'parede.png';
+//    const imgDespensa = new Image(); imgDespensa.src = 'despensa.png';
+//    const imgChapa    = new Image(); imgChapa.src    = 'chapa.png';
+//    const imgBancada  = new Image(); imgBancada.src  = 'bancada.png';
+//    const imgEntrega  = new Image(); imgEntrega.src  = 'entrega.png';
+//    const imgGomaCrua   = new Image(); imgGomaCrua.src   = 'goma_crua.png';
+//    const imgGomaPronte = new Image(); imgGomaPronte.src = 'goma_pronta.png';
+//    const imgTapioca    = new Image(); imgTapioca.src    = 'tapioca.png';
+//
+//  Depois substitua o conteúdo de cada função abaixo.
+// ════════════════════════════════════════════════════════════════
+
+// Auxiliar: retângulo com cantos arredondados (canvas nativo nem sempre tem isso)
+function rRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);   ctx.quadraticCurveTo(x+w, y,   x+w, y+r);
+  ctx.lineTo(x + w, y + h - r); ctx.quadraticCurveTo(x+w, y+h, x+w-r, y+h);
+  ctx.lineTo(x + r, y + h);   ctx.quadraticCurveTo(x,   y+h, x,   y+h-r);
+  ctx.lineTo(x, y + r);       ctx.quadraticCurveTo(x,   y,   x+r, y);
+  ctx.closePath();
+}
+
+// CHÃO ──────────────────────────────────────────────────────────
+// x, y = canto superior esquerdo do tile
+// TROQUE POR: ctx.drawImage(imgChao, x, y, TILE, TILE)
+function desenhaChao(x, y) {
+  ctx.fillStyle = '#f5dfa0';
+  ctx.fillRect(x, y, TILE, TILE);
+  ctx.strokeStyle = 'rgba(180,135,55,0.3)';
+  ctx.lineWidth = 0.5;
+  ctx.strokeRect(x + 1, y + 1, TILE - 2, TILE - 2);
+}
+
+// PAREDE ────────────────────────────────────────────────────────
+// TROQUE POR: ctx.drawImage(imgParede, x, y, TILE, TILE)
+function desenhaParede(x, y) {
+  ctx.fillStyle = '#7a4929';
+  ctx.fillRect(x, y, TILE, TILE);
+  ctx.strokeStyle = '#5c3318';
+  ctx.lineWidth = 1;
+  // padrão de tijolos decorativo
+  for (let br = 0; br < 4; br++) {
+    const offset = br % 2 === 0 ? 0 : TILE / 2;
+    ctx.strokeRect(x + offset + 2, y + br * 16 + 2, TILE / 2 - 4, 12);
+  }
+}
+
+// ESTAÇÃO ───────────────────────────────────────────────────────
+// tipo = 2/3/4/5  destacada = jogador está perto  st = objeto da estação
+//
+// Para estações diferentes, use:
+//   const imgs = { 2: imgDespensa, 3: imgChapa, 4: imgBancada, 5: imgEntrega };
+//   ctx.drawImage(imgs[tipo], x, y, TILE, TILE);
+function desenhaEstacao(x, y, tipo, destacada, st) {
+  const info = ESTACAO_INFO[tipo];
+
+  // corpo da estação
+  ctx.fillStyle = destacada ? '#fffbe0' : info.cor;
+  rRect(x + 4, y + 4, TILE - 8, TILE - 8, 8);
+  ctx.fill();
+
+  // contorno dourado quando o jogador está perto
+  if (destacada) {
+    ctx.strokeStyle = '#ffd700';
+    ctx.lineWidth = 3;
+    rRect(x + 4, y + 4, TILE - 8, TILE - 8, 8);
+    ctx.stroke();
+  }
+
+  // rótulo
+  ctx.fillStyle = destacada ? '#333' : 'rgba(255,255,255,0.9)';
+  ctx.font = 'bold 10px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  ctx.fillText(info.rotulo, x + TILE / 2, y + TILE - 5);
+  ctx.textBaseline = 'alphabetic';
+
+  // item dentro da estação
+  if (st && st.item) {
+    desenhaIconeItem(st.item, x + TILE / 2, y + TILE / 2 - 6, 22);
+  }
+
+  // barra de progresso (chapa cozinhando)
+  if (st && st.cozinhando) {
+    const prog = st.timer / TEMPO_CHAPA;
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    ctx.fillRect(x + 8, y + TILE - 20, TILE - 16, 7);
+    ctx.fillStyle = '#ff8800';
+    ctx.fillRect(x + 8, y + TILE - 20, (TILE - 16) * prog, 7);
+  }
+}
+
+// JOGADOR ───────────────────────────────────────────────────────
+// px, py = centro   tam = tamanho   item = o que carrega (ou null)
+// TROQUE POR: ctx.drawImage(imgJogador, px - tam/2, py - tam/2, tam, tam)
+function desenhaJogador(px, py, tam, item) {
+  // sombra
+  ctx.fillStyle = 'rgba(0,0,0,0.18)';
+  ctx.beginPath();
+  ctx.ellipse(px, py + tam / 2 + 1, tam / 2.2, 5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // corpo
+  ctx.fillStyle = '#c0392b';
+  rRect(px - tam / 2, py - tam / 2, tam, tam, 8);
+  ctx.fill();
+  // rosto
+  ctx.fillStyle = '#f5cba7';
+  ctx.beginPath();
+  ctx.arc(px, py - 4, tam / 3.5, 0, Math.PI * 2);
+  ctx.fill();
+  // item nas mãos (acima da cabeça)
+  if (item) desenhaIconeItem(item, px, py - tam - 4, 22);
+}
+
+// ÍCONE DE ITEM ─────────────────────────────────────────────────
+// cx, cy = centro   s = diâmetro
+// Para usar imagens: ctx.drawImage(imgItens[nome], cx-s/2, cy-s/2, s, s)
+function desenhaIconeItem(nome, cx, cy, s) {
+  const cores  = { goma_crua: '#fffbe0', goma_pronta: '#ffe040', tapioca: '#f5ecc8' };
+  const labels = { goma_crua: 'GC',      goma_pronta: 'GP',       tapioca: 'TAP' };
+
+  ctx.fillStyle = cores[nome] ?? '#ddd';
+  ctx.beginPath();
+  ctx.arc(cx, cy, s / 2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#999';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  ctx.fillStyle = '#444';
+  ctx.font = `bold ${Math.floor(s * 0.32)}px sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(labels[nome] ?? nome[0].toUpperCase(), cx, cy);
+  ctx.textBaseline = 'alphabetic';
+}
+
+// HUD ───────────────────────────────────────────────────────────
+// Painel superior: bandeirinhas, timer, pontos, guia de receita
+function desenhaHUD() {
+  // fundo
+  ctx.fillStyle = '#5a2000';
+  ctx.fillRect(0, 0, W, HUD_H);
+
+  // bandeirinhas
+  const bCores = ['#e74c3c','#f1c40f','#2ecc71','#e67e22','#9b59b6','#3498db'];
+  const bW = W / 8;
+  for (let i = 0; i < 9; i++) {
+    ctx.fillStyle = bCores[i % bCores.length];
+    const bx = i * bW;
+    ctx.beginPath();
+    ctx.moveTo(bx, 0); ctx.lineTo(bx + bW, 0); ctx.lineTo(bx + bW / 2, 22);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // linha separadora
+  ctx.strokeStyle = '#ff9500';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(0, HUD_H - 1); ctx.lineTo(W, HUD_H - 1); ctx.stroke();
+
+  // timer (fica vermelho nos últimos 15s)
+  ctx.fillStyle = tempoRestante <= 15 ? '#ff6060' : '#ffffff';
+  ctx.font = `bold ${tempoRestante <= 15 ? '42' : '38'}px monospace`;
+  ctx.textAlign = 'center';
+  ctx.fillText(Math.ceil(tempoRestante), W / 2, 88);
+
+  // pontos
+  ctx.fillStyle = '#ffd700';
+  ctx.font = 'bold 17px sans-serif';
+  ctx.textAlign = 'right';
+  ctx.fillText(pontos + ' pts', W - 10, 88);
+
+  // item que o jogador carrega
+  if (jog.item) {
+    ctx.fillStyle = '#fffbe0';
+    ctx.font = '12px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText(NOME_ITEM[jog.item] ?? jog.item, 10, 88);
+  }
+
+  // Guia de passos da receita (bolinha destaca o passo atual)
+  const passo  = passoAtual();
+  const guia   = [[1,'Pegar','goma'],[2,'Ir à','chapa'],[3,'Esp.','cozinhar'],[4,'Ir à','bancada'],[5,'Entre','gar!']];
+  const gW     = W / guia.length;
+  guia.forEach(([id, a, b], i) => {
+    const gx    = i * gW + gW / 2;
+    const ativo = id === passo;
+    // bolinha
+    ctx.beginPath();
+    ctx.arc(gx, 38, 13, 0, Math.PI * 2);
+    ctx.fillStyle = ativo ? '#ffd700' : 'rgba(255,255,255,0.18)';
+    ctx.fill();
+    // texto dentro
+    ctx.fillStyle  = ativo ? '#333' : '#777';
+    ctx.font       = `bold ${ativo ? 9 : 8}px sans-serif`;
+    ctx.textAlign  = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(a, gx, 33);
+    ctx.fillText(b, gx, 44);
+    ctx.textBaseline = 'alphabetic';
+    // linha conectora entre bolinhas
+    if (i < guia.length - 1) {
+      ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+      ctx.lineWidth   = 1;
+      ctx.beginPath();
+      ctx.moveTo(gx + 13, 38); ctx.lineTo(gx + gW - 13, 38);
+      ctx.stroke();
+    }
+  });
+}
+
+// CONTROLES ─────────────────────────────────────────────────────
+// Área inferior: joystick virtual + botão de ação
+function desenhaControles() {
+  ctx.fillStyle = '#200a00';
+  ctx.fillRect(0, H - CTRL_H, W, CTRL_H);
+
+  // base do joystick
+  ctx.beginPath();
+  ctx.arc(JOY.bx, JOY.by, JOY.br, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.1)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+  ctx.lineWidth   = 2;
+  ctx.stroke();
+  // linhas direcionais
+  ctx.strokeStyle = 'rgba(255,255,255,0.07)';
+  ctx.lineWidth   = 1;
+  ctx.beginPath(); ctx.moveTo(JOY.bx - JOY.br, JOY.by); ctx.lineTo(JOY.bx + JOY.br, JOY.by); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(JOY.bx, JOY.by - JOY.br); ctx.lineTo(JOY.bx, JOY.by + JOY.br); ctx.stroke();
+  // stick
+  ctx.beginPath();
+  ctx.arc(JOY.sx, JOY.sy, JOY.sr, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,190,80,0.75)';
+  ctx.fill();
+
+  // botão de ação
+  ctx.beginPath();
+  ctx.arc(BTN.x, BTN.y, BTN.r, 0, Math.PI * 2);
+  ctx.fillStyle = BTN.press ? '#d09010' : '#946005';
+  ctx.fill();
+  ctx.strokeStyle = BTN.press ? '#ffd700' : '#b87808';
+  ctx.lineWidth   = 3;
+  ctx.stroke();
+  ctx.fillStyle    = '#ffe';
+  ctx.font         = 'bold 14px sans-serif';
+  ctx.textAlign    = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('PEGAR', BTN.x, BTN.y);
+  ctx.textBaseline = 'alphabetic';
+
+  // dicas para PC
+  ctx.fillStyle = 'rgba(255,255,255,0.2)';
+  ctx.font      = '10px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('WASD / Setas', JOY.bx, JOY.by + JOY.br + 14);
+  ctx.fillText('Espaço / Enter', BTN.x, BTN.y + BTN.r + 14);
+}
+
+
+// ════════════════════════════════════════════════════════════════
+//  SEÇÃO 5 · CONTROLES DE TOQUE
+//
+//  Como o joystick funciona:
+//    - JOY.bx/by = centro da base (posição fixa na tela)
+//    - JOY.sx/sy = posição do stick (segue o dedo, limitado ao raio)
+//    - JOY.dx/dy = direção normalizada (−1 a +1) → usada para mover o jogador
+//
+//  O botão BTN dispara acaoBotao() ao ser tocado.
+// ════════════════════════════════════════════════════════════════
+const JOY = {
+  bx: 88, by: H - CTRL_H / 2,
+  br: 52, sr: 24,
+  sx: 88, sy: H - CTRL_H / 2,
+  ativo: false, tid: null,
+  dx: 0, dy: 0,
+};
+const BTN = {
+  x: W - 78, y: H - CTRL_H / 2,
+  r: 42,
+  press: false, tid: null,
+};
+
+// Converte posição do toque (relativa à página) para coordenadas do canvas
+function toCanvas(t) {
+  const r = canvas.getBoundingClientRect();
+  return {
+    x: (t.clientX - r.left) * (W / r.width),
+    y: (t.clientY - r.top)  * (H / r.height),
+  };
+}
+
+function atualizarJoystick(tx, ty) {
+  const dx = tx - JOY.bx, dy = ty - JOY.by;
+  const d  = Math.hypot(dx, dy);
+  const cl = Math.min(d, JOY.br);
+  const a  = Math.atan2(dy, dx);
+  JOY.sx = JOY.bx + Math.cos(a) * cl;
+  JOY.sy = JOY.by + Math.sin(a) * cl;
+  JOY.dx = d > 8 ? Math.cos(a) : 0;
+  JOY.dy = d > 8 ? Math.sin(a) : 0;
+}
+
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    const { x, y } = toCanvas(t);
+    if (!JOY.ativo && Math.hypot(x - JOY.bx, y - JOY.by) < JOY.br + 30) {
+      JOY.ativo = true; JOY.tid = t.identifier;
+      atualizarJoystick(x, y);
+    }
+    if (!BTN.press && Math.hypot(x - BTN.x, y - BTN.y) < BTN.r + 20) {
+      BTN.press = true; BTN.tid = t.identifier;
+      acaoBotao();
+    }
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches)
+    if (t.identifier === JOY.tid) { const p = toCanvas(t); atualizarJoystick(p.x, p.y); }
+}, { passive: false });
+
+canvas.addEventListener('touchend', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (t.identifier === JOY.tid) {
+      JOY.ativo = false; JOY.tid = null;
+      JOY.sx = JOY.bx; JOY.sy = JOY.by; JOY.dx = 0; JOY.dy = 0;
+    }
+    if (t.identifier === BTN.tid) { BTN.press = false; BTN.tid = null; }
+  }
+}, { passive: false });
+
+// Teclado (para testar no computador)
+const teclas = {};
+document.addEventListener('keydown', e => {
+  teclas[e.key] = true;
+  if ((e.key === ' ' || e.key === 'Enter') && !e.repeat) acaoBotao();
+});
+document.addEventListener('keyup', e => { delete teclas[e.key]; });
+
+function acaoBotao() {
+  if (fase === 'inicio')  { fase = 'jogando'; ultimoTS = null; }
+  else if (fase === 'jogando') interagir();
+  else if (fase === 'fim')     reiniciar();
+}
+
+
+// ════════════════════════════════════════════════════════════════
+//  SEÇÃO 6 · LÓGICA DO JOGO
+// ════════════════════════════════════════════════════════════════
+
+// Retorna true se a posição (px, py) cai dentro de uma parede
+function eParede(px, py) {
+  const c = Math.floor(px / TILE);
+  const r = Math.floor((py - HUD_H) / TILE);
+  if (c < 0 || c >= COLS || r < 0 || r >= ROWS) return true;
+  return MAP[r]?.[c] === 1;
+}
+
+// Move o jogador verificando colisão em X e Y separadamente
+// (isso permite "deslizar" ao longo das paredes)
+function moverJogador(dx, dy) {
+  const m = Math.hypot(dx, dy);
+  if (!m) return;
+  const nx = dx / m * VELOCIDADE;
+  const ny = dy / m * VELOCIDADE;
+  const s  = jog.tam / 2 - 4; // margem de colisão (px)
+
+  // tenta mover no eixo X
+  if (!eParede(jog.x + nx - s, jog.y - s) && !eParede(jog.x + nx + s, jog.y - s) &&
+      !eParede(jog.x + nx - s, jog.y + s) && !eParede(jog.x + nx + s, jog.y + s))
+    jog.x += nx;
+
+  // tenta mover no eixo Y
+  if (!eParede(jog.x - s, jog.y + ny - s) && !eParede(jog.x + s, jog.y + ny - s) &&
+      !eParede(jog.x - s, jog.y + ny + s) && !eParede(jog.x + s, jog.y + ny + s))
+    jog.y += ny;
+}
+
+// Retorna a estação mais próxima dentro do alcance de interação (ou null)
+function estacaoProxima() {
+  let melhor = null, dist = Infinity;
+  for (const st of sts) {
+    const d = Math.hypot(jog.x - st.cx, jog.y - st.cy);
+    if (d < dist) { dist = d; melhor = st; }
+  }
+  return dist < TILE * 1.1 ? melhor : null;
+}
+
+function mostrarAviso(txt) { aviso.texto = txt; aviso.timer = 2200; }
+
+// Interação com estação — disparada ao pressionar PEGAR
+function interagir() {
+  const st = estacaoProxima();
+  if (!st) { mostrarAviso('Chegue perto de uma estação!'); return; }
+
+  // DESPENSA (2): fornece goma crua infinitamente
+  if (st.tipo === 2) {
+    if (!jog.item) {
+      jog.item = 'goma_crua';
+      mostrarAviso('Goma crua pega! Leve à chapa.');
+    } else mostrarAviso('Você já está segurando algo!');
+  }
+
+  // CHAPA (3):
+  //   - colocar goma crua → inicia cozimento
+  //   - pegar goma pronta (quando pronta)
+  else if (st.tipo === 3) {
+    if (jog.item === 'goma_crua' && !st.item && !st.cozinhando) {
+      st.item = 'goma_crua'; st.cozinhando = true; st.timer = 0;
+      jog.item = null;
+      mostrarAviso('Cozinhando... aguarde!');
+    } else if (st.item === 'goma_pronta' && !jog.item) {
+      jog.item = 'goma_pronta'; st.item = null;
+      mostrarAviso('Goma pronta! Leve à bancada.');
+    } else if (st.cozinhando) {
+      mostrarAviso('Aguarde terminar de cozinhar!');
+    }
+  }
+
+  // BANCADA (4): monta a tapioca com a goma pronta
+  else if (st.tipo === 4) {
+    if (jog.item === 'goma_pronta') {
+      jog.item = 'tapioca';
+      mostrarAviso('Tapioca pronta! Entregue agora!');
+    } else {
+      mostrarAviso('Precisa da goma pronta!');
+    }
+  }
+
+  // ENTREGA (5): entrega a tapioca → +100 pontos
+  else if (st.tipo === 5) {
+    if (jog.item === 'tapioca') {
+      pontos += 100; jog.item = null;
+      mostrarAviso('+100 pts! Arretado, oxente!');
+    } else {
+      mostrarAviso('Você precisa da tapioca!');
+    }
+  }
+}
+
+// Determina em qual passo da receita o jogador está
+// (usado para destacar o passo no guia do HUD)
+function passoAtual() {
+  if (jog.item === 'tapioca')     return 5;
+  if (jog.item === 'goma_pronta') return 4;
+  const chapa = sts.find(s => s.tipo === 3);
+  if (chapa?.cozinhando || chapa?.item === 'goma_pronta') return 3;
+  if (jog.item === 'goma_crua')   return 2;
+  return 1;
+}
+
+function reiniciar() {
+  jog.x = W / 2; jog.y = HUD_H + TILE * 2.5; jog.item = null;
+  pontos = 0; tempoRestante = TEMPO_PARTIDA;
+  fase = 'inicio'; ultimoTS = null;
+  sts.forEach(s => { s.item = null; s.cozinhando = false; s.timer = 0; });
+}
+
+
+// ════════════════════════════════════════════════════════════════
+//  SEÇÃO 7 · LOOP PRINCIPAL
+//
+//  requestAnimationFrame chama loop() ~60 vezes por segundo.
+//  Cada chamada:
+//    1. Calcula dt (tempo desde o último frame, em ms)
+//    2. Chama atualizar(dt) para mover objetos e timers
+//    3. Chama desenhar() para redesenhar tudo do zero
+// ════════════════════════════════════════════════════════════════
+
+function atualizar(dt) {
+  if (fase !== 'jogando') return;
+
+  // Timer da partida
+  tempoRestante = Math.max(0, tempoRestante - dt / 1000);
+  if (tempoRestante === 0) { fase = 'fim'; return; }
+
+  // Movimento — combina joystick e teclado
+  let dx = JOY.dx, dy = JOY.dy;
+  if (teclas['ArrowLeft']  || teclas['a'] || teclas['A']) dx--;
+  if (teclas['ArrowRight'] || teclas['d'] || teclas['D']) dx++;
+  if (teclas['ArrowUp']    || teclas['w'] || teclas['W']) dy--;
+  if (teclas['ArrowDown']  || teclas['s'] || teclas['S']) dy++;
+  if (dx || dy) moverJogador(dx, dy);
+
+  // Progresso da chapa
+  sts.forEach(st => {
+    if (st.tipo === 3 && st.cozinhando) {
+      st.timer += dt;
+      if (st.timer >= TEMPO_CHAPA) {
+        st.item      = 'goma_pronta';
+        st.cozinhando = false;
+        mostrarAviso('Goma pronta na chapa! Vá pegar!');
+      }
+    }
+  });
+
+  // Reduz timer do aviso flutuante
+  if (aviso.timer > 0) aviso.timer -= dt;
+}
+
+function desenhar() {
+  ctx.clearRect(0, 0, W, H);
+
+  // Desenha o mapa tile por tile
+  const perto = fase === 'jogando' ? estacaoProxima() : null;
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const tipo = MAP[r][c];
+      const x    = c * TILE, y = HUD_H + r * TILE;
+      if (tipo === 1) { desenhaParede(x, y); continue; }
+      desenhaChao(x, y);
+      if (tipo >= 2) {
+        const st = sts.find(s => s.col === c && s.row === r);
+        desenhaEstacao(x, y, tipo, perto === st, st);
+      }
+    }
+  }
+
+  // Jogador (não desenhado na tela de início)
+  if (fase !== 'inicio') desenhaJogador(jog.x, jog.y, jog.tam, jog.item);
+
+  // Aviso flutuante (some gradualmente)
+  if (aviso.timer > 0) {
+    ctx.globalAlpha = Math.min(1, aviso.timer / 400);
+    ctx.fillStyle   = '#fff8e0';
+    ctx.font        = 'bold 15px sans-serif';
+    ctx.textAlign   = 'center';
+    ctx.fillText(aviso.texto, W / 2, HUD_H + TILE * ROWS / 2);
+    ctx.globalAlpha = 1;
+  }
+
+  // HUD e controles sempre por cima de tudo
+  desenhaHUD();
+  desenhaControles();
+
+  // ── Tela de início ─────────────────────────────────────────────
+  if (fase === 'inicio') {
+    ctx.fillStyle = 'rgba(0,0,0,0.52)';
+    ctx.fillRect(0, HUD_H, W, TILE * ROWS);
+    ctx.fillStyle = '#ffd700';
+    ctx.font      = 'bold 30px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Cozinha Junina!', W / 2, HUD_H + 108);
+    ctx.fillStyle = '#ffe';
+    ctx.font      = '16px sans-serif';
+    ctx.fillText('Faça o máximo de tapiocas', W / 2, HUD_H + 148);
+    ctx.fillText('em 90 segundos!', W / 2, HUD_H + 172);
+    ctx.fillStyle = 'rgba(255,255,255,0.4)';
+    ctx.font      = '13px sans-serif';
+    ctx.fillText('Pressione ESPAÇO ou toque em PEGAR', W / 2, HUD_H + 228);
+  }
+
+  // ── Tela de fim ────────────────────────────────────────────────
+  if (fase === 'fim') {
+    ctx.fillStyle = 'rgba(0,0,0,0.62)';
+    ctx.fillRect(0, HUD_H, W, TILE * ROWS);
+    ctx.fillStyle = '#ffd700';
+    ctx.font      = 'bold 36px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Fim de Jogo!', W / 2, HUD_H + 100);
+    ctx.fillStyle = '#fff';
+    ctx.font      = 'bold 28px sans-serif';
+    ctx.fillText(pontos + ' pontos', W / 2, HUD_H + 148);
+    const msg = pontos === 0   ? 'Pratique mais!'        :
+                pontos < 300   ? 'Bom começo!'           :
+                pontos < 600   ? 'Arretado!'             :
+                                 'Mestre da cozinha!';
+    ctx.fillStyle = '#ffd700';
+    ctx.font      = 'bold 20px sans-serif';
+    ctx.fillText(msg, W / 2, HUD_H + 188);
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    ctx.font      = '13px sans-serif';
+    ctx.fillText('Toque em PEGAR para jogar de novo', W / 2, HUD_H + 238);
+  }
+}
+
+function loop(ts) {
+  if (!ultimoTS) ultimoTS = ts;
+  const dt = Math.min(ts - ultimoTS, 80); // cap de 80ms (evita pulos grandes se a aba perder foco)
+  ultimoTS = ts;
+  atualizar(dt);
+  desenhar();
+  requestAnimationFrame(loop);
+}
+
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
